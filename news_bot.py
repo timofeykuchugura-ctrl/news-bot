@@ -48,36 +48,41 @@ FEEDS = {
     "Roblox Blog": "https://blog.roblox.com/feed/",
 }
 
-# Отслеживаемые популярные игры Roblox. Список можно расширять.
-POPULAR_ROBLOX_GAMES = [
-    "Grow a Garden",
-    "Steal a Brainrot",
-    "99 Nights in the Forest",
-    "Blox Fruits",
-    "Brookhaven",
-    "Adopt Me",
-    "Dress to Impress",
-    "Murder Mystery 2",
-    "Fisch",
-    "DOORS",
-    "RIVALS",
-    "The Strongest Battlegrounds",
-    "Blade Ball",
-    "Tower Defense Simulator",
-    "Pet Simulator 99",
-    "Jailbreak",
-    "Arsenal",
-    "Piggy",
-    "Evade",
-    "Bee Swarm Simulator",
-    "Royale High",
-]
+# Популярность берём из актуальных подборок Roblox Discover, а не из
+# вручную составленного списка. Игра должна быть в верхних подборках Roblox
+# и иметь минимум 1 000 игроков онлайн на момент проверки.
+ROBLOX_DISCOVER_URL = "https://apis.roblox.com/explore-api/v1/get-sort-content"
+ROBLOX_SORTS = ("top-playing-now", "top-trending")
+MIN_LIVE_PLAYERS = 1000
+FILTER_VERSION = 2
 
-# Общие темы официальных новостей самой платформы Roblox.
-ROBLOX_PLATFORM_TERMS = (
-    "roblox", "robux", "avatar", "creator", "devforum",
-    "новости платформы", "обновление платформы",
+# Оставляем только материалы, похожие на новость, а не рекламное описание игры.
+NEWS_SIGNAL = re.compile(
+    r"\b(update|updated|patch|event|codes?|redeem|release|released|"
+    r"shutdown|banned|maintenance|leak|new feature|change|nerf|buff|"
+    r"добавил[иа]?|обновлени[ея]|ивент|событи[ея]|код[ыов]?|"
+    r"промокод[ыов]?|вышел|вышла|запустил[иа]?|изменени[ея]|"
+    r"отключени[ея]|техработ[ы]?|утечк[аи])\b",
+    re.I,
 )
+PROMO_LANGUAGE = re.compile(
+    r"\b(adventure|explore|become a legend|choose your side|"
+    r"discover the world|start your journey|погрузись в приключени[ея]|"
+    r"отправляйся в приключени[ея]|исследуй мир|стань легендой)\b",
+    re.I,
+)
+CODE_WORD = re.compile(r"\b(codes?|промокод[ыов]?)\b", re.I)
+CODE_TOKEN = re.compile(r"(?<![A-ZА-Я0-9])[A-Z0-9]{4,20}(?![A-ZА-Я0-9])", re.I)
+CODE_LABEL = re.compile(r"\b(?:codes?|промокод[ыов]?)\s*[:：-]\s*", re.I)
+
+
+def has_actual_codes(text):
+    """Ищет код только рядом с явной подписью Codes/Промокоды."""
+    for match in CODE_LABEL.finditer(text or ""):
+        fragment = (text or "")[match.end():match.end() + 100]
+        if CODE_TOKEN.search(fragment):
+            return True
+    return False
 
 
 # ========================= СОСТОЯНИЕ =========================
@@ -93,6 +98,10 @@ def load_state():
     state.setdefault("headlines", [])
     state.setdefault("queue", [])
     state.setdefault("built_at", 0)
+    if state.get("filter_version") != FILTER_VERSION:
+        state["queue"] = []
+        state["filter_version"] = FILTER_VERSION
+        state["built_at"] = 0
     return state
 
 
@@ -100,6 +109,7 @@ def save_state(state):
     state["links"] = state["links"][-600:]
     state["titles"] = state["titles"][-600:]
     state["headlines"] = state["headlines"][-40:]
+    state["filter_version"] = FILTER_VERSION
     with open(STATE_FILE, "w", encoding="utf-8") as file:
         json.dump(state, file, ensure_ascii=False, indent=2)
 
@@ -181,13 +191,69 @@ def spread(items, limit):
     return result
 
 
-def is_roblox_related(title, summary):
-    """Оставляет новости об играх Roblox и самой платформе."""
+def fetch_popular_roblox_games():
+    """Получает названия игр из живых топ-подборок Roblox Discover."""
+    popular = {}
+    session_id = f"timnews-{int(time.time())}"
+
+    def walk(value):
+        if isinstance(value, dict):
+            name = value.get("name") or value.get("title")
+            players = value.get("playerCount")
+            if players is None:
+                players = value.get("playing")
+            if isinstance(name, str) and isinstance(players, (int, float)):
+                if players >= MIN_LIVE_PLAYERS:
+                    popular[norm(name)] = max(int(players), popular.get(norm(name), 0))
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    for sort_id in ROBLOX_SORTS:
+        try:
+            response = requests.get(
+                ROBLOX_DISCOVER_URL,
+                params={
+                    "sessionId": session_id,
+                    "sortId": sort_id,
+                    "device": "computer",
+                    "country": "all",
+                },
+                headers=UA,
+                timeout=20,
+            )
+            response.raise_for_status()
+            walk(response.json())
+            print(f"[Roblox] Загружена подборка {sort_id}")
+        except (requests.RequestException, ValueError) as error:
+            print(f"[Roblox] Не удалось загрузить {sort_id}: {error}")
+
+    if not popular:
+        raise RuntimeError("Roblox Discover не вернул список популярных игр — публикация игр остановлена")
+
+    print(f"[Roblox] Популярных игр для фильтра: {len(popular)}")
+    return popular
+
+
+def has_real_news(title, summary):
+    """Отсекает рекламные описания и обещания кодов без самих кодов."""
+    text = f"{title} {summary}"
+    if not NEWS_SIGNAL.search(text):
+        return False
+    if PROMO_LANGUAGE.search(text) and not NEWS_SIGNAL.search(title):
+        return False
+    # Нельзя обещать новые коды, если в исходном материале нет самих кодов.
+    if CODE_WORD.search(title) and not has_actual_codes(summary):
+        return False
+    return True
+
+
+def is_roblox_related(title, summary, popular_games):
+    """Игра должна присутствовать в актуальном Roblox Discover top-листе."""
     text = norm(f"{title} {summary}")
-    game_names = [norm(name) for name in POPULAR_ROBLOX_GAMES]
-    if any(name and name in text for name in game_names):
-        return True
-    return any(norm(term) in text for term in ROBLOX_PLATFORM_TERMS)
+    return any(name and name in text for name in popular_games)
 
 
 def collect(state):
@@ -195,6 +261,12 @@ def collect(state):
     seen_titles = set(state["titles"])
     now = datetime.now(timezone.utc)
     regular_items = []
+
+    try:
+        popular_games = fetch_popular_roblox_games()
+    except Exception as error:
+        print(f"[skip] Проверка популярности не прошла: {error}")
+        return []
 
     # Используем только Roblox-источники — общие игровые СМИ отключены.
     sources = list(FEEDS.items())
@@ -224,7 +296,10 @@ def collect(state):
                 continue
 
             summary = strip_tags(entry.get("summary", ""))[:1500]
-            if not is_roblox_related(title, summary):
+            if not is_roblox_related(title, summary, popular_games):
+                continue
+            if not has_real_news(title, summary):
+                print(f"[skip] Не похоже на настоящую новость: {title}")
                 continue
 
             item = {
@@ -325,18 +400,14 @@ def choose_many(items, state, count):
 Две или три выбирай только при действительно крупных событиях.
 Если несколько сайтов пишут об одном событии, выбери только один материал.
 Не выбирай повторы уже опубликованных новостей.
-Выбирай только новости о Roblox и играх внутри Roblox.
-Особенно следи за этими режимами: Grow a Garden, Steal a Brainrot,
-99 Nights in the Forest, Blox Fruits, Brookhaven, Adopt Me,
-Dress to Impress, Murder Mystery 2, Fisch, DOORS, RIVALS,
-The Strongest Battlegrounds, Blade Ball, Tower Defense Simulator,
-Pet Simulator 99, Jailbreak, Arsenal, Piggy, Evade,
-Bee Swarm Simulator и Royale High.
-Также выбирай важные официальные обновления Roblox, изменения Robux,
-аватаров, инструментов разработчиков и безопасности платформы.
-Не выбирай новости о Minecraft, Fortnite, GTA или других играх вне Roblox.
-Промокоды и гайды выбирай только если нет более важных новостей.
-Не выбирай рекламу и пустые темы. Расположи выбранные по важности.
+Выбирай только реальные новости об играх Roblox, которые уже прошли
+автоматическую проверку по актуальным топ-подборкам Roblox Discover.
+Не выбирай малоизвестные режимы, рекламные описания, обзоры без нового события,
+пустые анонсы и тексты в стиле «отправляйтесь в приключение».
+Не выбирай новости о Minecraft, Fortnite, GTA или играх вне Roblox.
+Если в заголовке обещаны коды, выбирай материал только если в исходном тексте
+действительно указаны сами коды. Никогда не придумывай коды.
+Расположи выбранные новости по важности.
 
 Заголовки:
 {listing}
@@ -367,6 +438,8 @@ def rewrite_many(items):
 Пиши простым живым языком. Названия игр, героев и функций оставляй как в оригинале.
 Для каждой новости: пиши своими словами, если текст на другом языке — переведи.
 Используй только факты из предоставленного текста, ничего не выдумывай.
+Не превращай рекламное описание игры в новость. Не придумывай промокоды.
+Если в исходном тексте нет конкретных кодов, не пиши о новых кодах.
 Нейтральный тон, 2–4 коротких предложения, максимум 600 символов.
 Не добавляй ссылки, названия СМИ или упоминания источника.
 
@@ -477,9 +550,20 @@ def build_queue(state):
     for item, post in zip(chosen, posts):
         if not post:
             continue
+        headline = str(post.get("headline", "")).strip()
+        body = str(post.get("body", "")).strip()
+        if not headline or not body:
+            print(f"[skip] Пустая публикация: {item['title']}")
+            continue
+        if CODE_WORD.search(headline) and not has_actual_codes(item.get("summary", "")):
+            print(f"[skip] Заголовок обещает коды, но кодов нет: {headline}")
+            continue
+        if not NEWS_SIGNAL.search(f"{headline} {body}"):
+            print(f"[skip] Gemini сделал рекламный/пустой текст: {headline}")
+            continue
         entry = dict(item)
-        entry["headline"] = post["headline"]
-        entry["body"] = post["body"]
+        entry["headline"] = headline
+        entry["body"] = body
         queue.append(entry)
 
     if not queue:
