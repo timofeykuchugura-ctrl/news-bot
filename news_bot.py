@@ -32,7 +32,6 @@ FOOTER_URL = "https://t.me/timnews_roblox"
 
 STATE_FILE = "posted.json"
 MAX_AGE_HOURS = 24
-SOCIAL_MAX_AGE_HOURS = 24
 POSTS_PER_BATCH = 3
 QUEUE_MAX_AGE_MIN = 100
 PER_FEED = 15
@@ -49,23 +48,36 @@ FEEDS = {
     "Roblox Blog": "https://blog.roblox.com/feed/",
 }
 
-# Общие игровые и технические СМИ. Берём только материалы с упоминанием Roblox.
-SOCIAL_FEEDS = {
-    "The Verge": "https://www.theverge.com/rss/index.xml",
-    "Polygon": "https://www.polygon.com/rss/index.xml",
-    "PC Gamer": "https://www.pcgamer.com/rss/",
-    "GameSpot": "https://www.gamespot.com/feeds/news/",
-    "IGN": "https://feeds.ign.com/ign/news",
-    "Engadget": "https://www.engadget.com/rss.xml",
-    "TechCrunch": "https://techcrunch.com/feed/",
-    "StopGame": "https://rss.stopgame.ru/rss_news.xml",
-    "iXBT": "https://www.ixbt.com/export/news.rss",
-    "3DNews": "https://3dnews.ru/news/rss/",
-    "vc.ru": "https://vc.ru/rss",
-    "Habr": "https://habr.com/ru/rss/news/",
-}
+# Отслеживаемые популярные игры Roblox. Список можно расширять.
+POPULAR_ROBLOX_GAMES = [
+    "Grow a Garden",
+    "Steal a Brainrot",
+    "99 Nights in the Forest",
+    "Blox Fruits",
+    "Brookhaven",
+    "Adopt Me",
+    "Dress to Impress",
+    "Murder Mystery 2",
+    "Fisch",
+    "DOORS",
+    "RIVALS",
+    "The Strongest Battlegrounds",
+    "Blade Ball",
+    "Tower Defense Simulator",
+    "Pet Simulator 99",
+    "Jailbreak",
+    "Arsenal",
+    "Piggy",
+    "Evade",
+    "Bee Swarm Simulator",
+    "Royale High",
+]
 
-SOCIAL_RE = re.compile(r"roblox|роблокс|робукс|robux|\brbx\b", re.I)
+# Общие темы официальных новостей самой платформы Roblox.
+ROBLOX_PLATFORM_TERMS = (
+    "roblox", "robux", "avatar", "creator", "devforum",
+    "новости платформы", "обновление платформы",
+)
 
 
 # ========================= СОСТОЯНИЕ =========================
@@ -169,18 +181,26 @@ def spread(items, limit):
     return result
 
 
+def is_roblox_related(title, summary):
+    """Оставляет новости об играх Roblox и самой платформе."""
+    text = norm(f"{title} {summary}")
+    game_names = [norm(name) for name in POPULAR_ROBLOX_GAMES]
+    if any(name and name in text for name in game_names):
+        return True
+    return any(norm(term) in text for term in ROBLOX_PLATFORM_TERMS)
+
+
 def collect(state):
     seen_links = set(state["links"])
     seen_titles = set(state["titles"])
     now = datetime.now(timezone.utc)
-    regular_items, social_items = [], []
+    regular_items = []
 
-    sources = [(name, url, False) for name, url in FEEDS.items()]
-    sources += [(name, url, True) for name, url in SOCIAL_FEEDS.items()]
+    # Используем только Roblox-источники — общие игровые СМИ отключены.
+    sources = list(FEEDS.items())
 
-    for name, url, is_social in sources:
-        age_hours = SOCIAL_MAX_AGE_HOURS if is_social else MAX_AGE_HOURS
-        cutoff = now - timedelta(hours=age_hours)
+    for name, url in sources:
+        cutoff = now - timedelta(hours=MAX_AGE_HOURS)
 
         try:
             response = requests.get(url, headers=UA, timeout=20)
@@ -204,7 +224,7 @@ def collect(state):
                 continue
 
             summary = strip_tags(entry.get("summary", ""))[:1500]
-            if is_social and not SOCIAL_RE.search(title + " " + summary):
+            if not is_roblox_related(title, summary):
                 continue
 
             item = {
@@ -213,16 +233,13 @@ def collect(state):
                 "summary": summary,
                 "link": link,
                 "image": find_image(entry),
-                "social": is_social,
             }
-            (social_items if is_social else regular_items).append(item)
+            regular_items.append(item)
             count += 1
 
-        print(f"[ok] {name}: {count} новых")
+        print(f"[ok] {name}: {count} новых подходящих новостей")
 
-    social_items = spread(social_items, 20)
-    regular_items = spread(regular_items, MAX_CANDIDATES - len(social_items))
-    return regular_items + social_items
+    return spread(regular_items, MAX_CANDIDATES)
 
 
 # ========================= GEMINI =========================
@@ -299,8 +316,8 @@ def choose_many(items, state, count):
         f"- {headline}" for headline in state["headlines"][-25:]
     ) or "(пока ничего)"
 
-    prompt = f"""Ты главный редактор русскоязычного Telegram-канала про Roblox.
-Ниже заголовки новостей из игровых СМИ и блогов за последние часы.
+    prompt = f"""Ты главный редактор русскоязычного Telegram-канала ТОЛЬКО про Roblox.
+Ниже заголовки новостей из Roblox-источников за последние часы.
 Недавно уже опубликовано:
 {recent}
 
@@ -308,8 +325,16 @@ def choose_many(items, state, count):
 Две или три выбирай только при действительно крупных событиях.
 Если несколько сайтов пишут об одном событии, выбери только один материал.
 Не выбирай повторы уже опубликованных новостей.
-Приоритет: обновления и новые функции Roblox, события и ивенты,
-новые популярные игры, изменения правил и безопасности, важные новости компании.
+Выбирай только новости о Roblox и играх внутри Roblox.
+Особенно следи за этими режимами: Grow a Garden, Steal a Brainrot,
+99 Nights in the Forest, Blox Fruits, Brookhaven, Adopt Me,
+Dress to Impress, Murder Mystery 2, Fisch, DOORS, RIVALS,
+The Strongest Battlegrounds, Blade Ball, Tower Defense Simulator,
+Pet Simulator 99, Jailbreak, Arsenal, Piggy, Evade,
+Bee Swarm Simulator и Royale High.
+Также выбирай важные официальные обновления Roblox, изменения Robux,
+аватаров, инструментов разработчиков и безопасности платформы.
+Не выбирай новости о Minecraft, Fortnite, GTA или других играх вне Roblox.
 Промокоды и гайды выбирай только если нет более важных новостей.
 Не выбирай рекламу и пустые темы. Расположи выбранные по важности.
 
@@ -338,7 +363,7 @@ def rewrite_many(items):
             f"[{index}] Заголовок: {item['title']}\nТекст: {item['summary']}"
         )
 
-    prompt = f"""Перепиши новости для русскоязычного Telegram-канала про Roblox.
+    prompt = f"""Перепиши новости для русскоязычного Telegram-канала только про Roblox.
 Пиши простым живым языком. Названия игр, героев и функций оставляй как в оригинале.
 Для каждой новости: пиши своими словами, если текст на другом языке — переведи.
 Используй только факты из предоставленного текста, ничего не выдумывай.
@@ -358,7 +383,7 @@ def rewrite_many(items):
 
 
 def rewrite_one(item):
-    prompt = f"""Перепиши новость для русскоязычного Telegram-канала про Roblox.
+    prompt = f"""Перепиши новость для русскоязычного Telegram-канала только про Roblox.
 Пиши простым живым языком, названия игр, героев и функций оставляй как в оригинале.
 Используй только факты из текста, ничего не выдумывай.
 Нейтральный тон, 2–4 коротких предложения, максимум 600 символов.
