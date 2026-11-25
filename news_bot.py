@@ -10,35 +10,38 @@ from datetime import datetime, timedelta, timezone
 import feedparser
 import requests
 
-
-# ---------- Настройки ----------
+# ========================= НАСТРОЙКИ =========================
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-CHANNEL_ID = os.environ["CHANNEL_ID"]  # например @vsenovosti
+CHANNEL_ID = os.environ["CHANNEL_ID"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
-# Актуальная основная модель и запасные модели.
-# Если основная модель недоступна или исчерпан лимит, пробуем следующие.
-GEMINI_MODEL = "gemini-3.8-flash"
-FALLBACK_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+# Можно изменить модель через GitHub Variables: GEMINI_MODEL.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+FALLBACK_MODELS = [
+    model.strip()
+    for model in os.environ.get(
+        "GEMINI_FALLBACK_MODELS",
+        "gemini-3.5-flash-lite,gemini-3.1-flash-lite",
+    ).split(",")
+    if model.strip()
+]
 
-# Подпись со ссылкой на ваш канал внизу каждого поста.
-CHANNEL_LINK_TEXT = "ВСЕ НОВОСТИ      "
-if CHANNEL_ID.startswith("@"):
-    CHANNEL_URL = "https://t.me/" + CHANNEL_ID[1:]
-else:
-    CHANNEL_URL = ""  # для закрытого канала вставьте ссылку-приглашение сюда
+# Подпись под каждым постом. Текст кликабельный.
+FOOTER_TEXT = "ПОДПИСАТЬСЯ: TIMNEWS↩️"
+FOOTER_URL = "https://t.me/timnews_roblox"
 
 STATE_FILE = "posted.json"
-MAX_AGE_HOURS = 24        # брать новости не старше N часов
-POSTS_PER_BATCH = 3       # максимум постов за один запуск
-QUEUE_MAX_AGE_MIN = 100   # если очередь старше, она выбрасывается и собирается заново
-PER_FEED = 15             # сколько последних записей брать из каждой ленты
-MAX_CANDIDATES = 70       # сколько заголовков показывать ИИ
+MAX_AGE_HOURS = 24
+SOCIAL_MAX_AGE_HOURS = 24
+POSTS_PER_BATCH = 3
+QUEUE_MAX_AGE_MIN = 100
+PER_FEED = 15
+MAX_CANDIDATES = 70
 
+UA = {"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"}
 
-# Название -> адрес RSS. Сломанные ленты просто пропускаются.
+# Основные RSS-ленты Roblox.
 FEEDS = {
-    # Ленты только про Roblox (берутся все записи)
     "Try Hard Guides": "https://tryhardguides.com/tag/roblox/feed/",
     "Gamer Journalist": "https://gamerjournalist.com/roblox/feed",
     "Pro Game Guides": "https://progameguides.com/roblox/feed/",
@@ -46,12 +49,8 @@ FEEDS = {
     "Roblox Blog": "https://blog.roblox.com/feed/",
 }
 
-
-# ---------- Новости про соцсети и мессенджеры ----------
-# Из этих лент берутся только записи, где встречаются слова из SOCIAL_WORDS.
-SOCIAL_MAX_AGE_HOURS = 24
+# Общие игровые и технические СМИ. Берём только материалы с упоминанием Roblox.
 SOCIAL_FEEDS = {
-    # Общие игровые и технические СМИ: берутся только записи, где упомянут Roblox.
     "The Verge": "https://www.theverge.com/rss/index.xml",
     "Polygon": "https://www.polygon.com/rss/index.xml",
     "PC Gamer": "https://www.pcgamer.com/rss/",
@@ -65,51 +64,49 @@ SOCIAL_FEEDS = {
     "vc.ru": "https://vc.ru/rss",
     "Habr": "https://habr.com/ru/rss/news/",
 }
-SOCIAL_WORDS = r"roblox|роблокс|робукс|robux|\brbx\b"
-SOCIAL_RE = re.compile(SOCIAL_WORDS, re.I)
 
-UA = {"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"}
+SOCIAL_RE = re.compile(r"roblox|роблокс|робукс|robux|\brbx\b", re.I)
 
 
-# ---------- Состояние (что уже опубликовано) ----------
+# ========================= СОСТОЯНИЕ =========================
 def load_state():
     try:
-        with open(STATE_FILE, encoding="utf-8") as f:
-            data = json.load(f)
+        with open(STATE_FILE, encoding="utf-8") as file:
+            state = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
-        data = {}
+        state = {}
 
-    data.setdefault("links", [])
-    data.setdefault("titles", [])
-    data.setdefault("headlines", [])
-    data.setdefault("queue", [])
-    data.setdefault("built_at", 0)
-    return data
+    state.setdefault("links", [])
+    state.setdefault("titles", [])
+    state.setdefault("headlines", [])
+    state.setdefault("queue", [])
+    state.setdefault("built_at", 0)
+    return state
 
 
 def save_state(state):
     state["links"] = state["links"][-600:]
     state["titles"] = state["titles"][-600:]
     state["headlines"] = state["headlines"][-40:]
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=1)
+    with open(STATE_FILE, "w", encoding="utf-8") as file:
+        json.dump(state, file, ensure_ascii=False, indent=2)
 
 
-def norm(text):
-    return re.sub(r"\W+", " ", text.lower()).strip()
+def norm(value):
+    return re.sub(r"\W+", " ", (value or "").lower()).strip()
 
 
-def strip_tags(text):
-    text = re.sub(r"<[^>]+>", " ", text or "")
-    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+def strip_tags(value):
+    value = re.sub(r"<[^>]+>", " ", value or "")
+    return re.sub(r"\s+", " ", html.unescape(value)).strip()
 
 
-# ---------- Сбор новостей ----------
+# ========================= СБОР НОВОСТЕЙ =========================
 def entry_time(entry):
-    t = entry.get("published_parsed") or entry.get("updated_parsed")
-    if not t:
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not parsed:
         return None
-    return datetime.fromtimestamp(calendar.timegm(t), tz=timezone.utc)
+    return datetime.fromtimestamp(calendar.timegm(parsed), tz=timezone.utc)
 
 
 def find_image(entry):
@@ -126,19 +123,17 @@ def find_image(entry):
         if enclosure.get("type", "").startswith("image") and enclosure.get("href"):
             return enclosure["href"]
 
-    blob = entry.get("summary", "") or ""
-    for content in entry.get("content", []) or []:
-        blob += content.get("value", "")
-
-    match = re.search(r'<img[^>]+src=["\']([^"\']+)', blob)
-    if match:
-        return match.group(1)
-    return None
+    content = entry.get("summary", "") or ""
+    for part in entry.get("content", []) or []:
+        content += part.get("value", "")
+    match = re.search(r'<img[^>]+src=["\']([^"\']+)', content)
+    return match.group(1) if match else None
 
 
 def og_image(url):
     try:
         response = requests.get(url, headers=UA, timeout=15)
+        response.raise_for_status()
         match = re.search(
             r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
             response.text,
@@ -151,26 +146,48 @@ def og_image(url):
         return None
 
 
+def spread(items, limit):
+    """Распределяет материалы между источниками, чтобы одна лента не заняла всё."""
+    if len(items) <= limit:
+        return items
+
+    by_source = {}
+    for item in items:
+        by_source.setdefault(item["source"], []).append(item)
+
+    result = []
+    index = 0
+    while len(result) < limit:
+        added = False
+        for source_items in by_source.values():
+            if index < len(source_items) and len(result) < limit:
+                result.append(source_items[index])
+                added = True
+        if not added:
+            break
+        index += 1
+    return result
+
+
 def collect(state):
     seen_links = set(state["links"])
     seen_titles = set(state["titles"])
     now = datetime.now(timezone.utc)
-    world, social = [], []
+    regular_items, social_items = [], []
 
-    sources = [(name, url, False) for name, url in FEEDS.items()] + [
-        (name, url, True) for name, url in SOCIAL_FEEDS.items()
-    ]
+    sources = [(name, url, False) for name, url in FEEDS.items()]
+    sources += [(name, url, True) for name, url in SOCIAL_FEEDS.items()]
 
     for name, url, is_social in sources:
-        hours = SOCIAL_MAX_AGE_HOURS if is_social else MAX_AGE_HOURS
-        cutoff = now - timedelta(hours=hours)
+        age_hours = SOCIAL_MAX_AGE_HOURS if is_social else MAX_AGE_HOURS
+        cutoff = now - timedelta(hours=age_hours)
 
         try:
             response = requests.get(url, headers=UA, timeout=20)
             response.raise_for_status()
             feed = feedparser.parse(response.content)
-        except Exception as exc:
-            print(f"[skip] {name}: {exc}")
+        except Exception as error:
+            print(f"[skip] {name}: {error}")
             continue
 
         count = 0
@@ -198,43 +215,20 @@ def collect(state):
                 "image": find_image(entry),
                 "social": is_social,
             }
-            (social if is_social else world).append(item)
+            (social_items if is_social else regular_items).append(item)
             count += 1
 
         print(f"[ok] {name}: {count} новых")
 
-    social = spread(social, 20)
-    world = spread(world, MAX_CANDIDATES - len(social))
-    return world + social
+    social_items = spread(social_items, 20)
+    regular_items = spread(regular_items, MAX_CANDIDATES - len(social_items))
+    return regular_items + social_items
 
 
-def spread(items, limit):
-    """Если новостей слишком много, берём поровну из каждого источника."""
-    if len(items) <= limit:
-        return items
-
-    by_source = {}
-    for item in items:
-        by_source.setdefault(item["source"], []).append(item)
-
-    output = []
-    index = 0
-    while len(output) < limit:
-        added = False
-        for source_items in by_source.values():
-            if index < len(source_items) and len(output) < limit:
-                output.append(source_items[index])
-                added = True
-        if not added:
-            break
-        index += 1
-    return output
-
-
-# ---------- Gemini ----------
+# ========================= GEMINI =========================
 def gemini_json(prompt):
-    models = [GEMINI_MODEL] + [model for model in FALLBACK_MODELS if model != GEMINI_MODEL]
-    body = {
+    models = [GEMINI_MODEL] + [m for m in FALLBACK_MODELS if m != GEMINI_MODEL]
+    payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
@@ -244,30 +238,35 @@ def gemini_json(prompt):
     last_error = "нет ответа"
 
     for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent"
+        )
 
         for attempt in range(3):
             try:
                 response = requests.post(
                     url,
-                    json=body,
+                    json=payload,
                     headers={"x-goog-api-key": GEMINI_API_KEY},
                     timeout=90,
                 )
-            except requests.RequestException as exc:
-                last_error = f"{model}: ошибка соединения: {exc}"
-                print(last_error)
+            except requests.RequestException as error:
+                last_error = f"{model}: ошибка соединения: {error}"
+                if attempt < 2:
+                    time.sleep(10 * (attempt + 1))
+                    continue
                 break
 
             if response.status_code == 429:
-                last_error = f"{model}: лимит запросов (429)"
+                last_error = f"{model}: превышен лимит (429)"
                 if attempt < 2:
                     time.sleep(15 * (attempt + 1))
                     continue
                 break
 
-            if response.status_code in (500, 503):
-                last_error = f"{model}: сбой сервера {response.status_code}"
+            if response.status_code in (500, 502, 503, 504):
+                last_error = f"{model}: временная ошибка сервера ({response.status_code})"
                 if attempt < 2:
                     time.sleep(10 * (attempt + 1))
                     continue
@@ -275,200 +274,157 @@ def gemini_json(prompt):
 
             if response.status_code == 404:
                 last_error = f"{model}: модель не найдена (404)"
-                print(last_error)
-                break
-
-            if not response.ok:
-                last_error = f"{model}: HTTP {response.status_code}: {response.text[:500]}"
-                print(last_error)
                 break
 
             try:
-                result_text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-                result_text = re.sub(
-                    r"^```(?:json)?|```$", "", result_text.strip(), flags=re.M
-                ).strip()
-                return json.loads(result_text)
-            except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-                last_error = f"{model}: не удалось прочитать JSON-ответ: {exc}"
-                print(last_error)
+                response.raise_for_status()
+                result = response.json()
+                answer = result["candidates"][0]["content"]["parts"][0]["text"]
+                answer = re.sub(r"^```(?:json)?\s*|\s*```$", "", answer.strip(), flags=re.I)
+                return json.loads(answer)
+            except (requests.RequestException, KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
+                last_error = f"{model}: не удалось обработать ответ: {error}"
                 break
 
-        print("Переключаюсь на следующую модель. Причина:", last_error)
+        print(f"Переключаюсь на следующую модель. Причина: {last_error}")
 
-    raise RuntimeError(f"Все модели Gemini недоступны. Последняя ошибка: {last_error}")
+    raise RuntimeError(f"Gemini не смог обработать запрос. Последняя ошибка: {last_error}")
 
 
-def choose_many(items, state, n):
-    def tag(item):
-        return " (СОЦСЕТИ)" if item.get("social") else ""
-
+def choose_many(items, state, count):
     listing = "\n".join(
-        f"{index}. [{item['source']}]{tag(item)} {item['title']}"
-        for index, item in enumerate(items)
+        f"{index}. {item['title']}" for index, item in enumerate(items)
     )
-    recent = "\n".join(f"- {headline}" for headline in state["headlines"][-25:]) or "(пока ничего)"
-    has_social = any(item.get("social") for item in items)
-    social_rule = ""
+    recent = "\n".join(
+        f"- {headline}" for headline in state["headlines"][-25:]
+    ) or "(пока ничего)"
 
-    if has_social:
-        social_rule = (
-            "\nЗаголовки с пометкой (СОЦСЕТИ) касаются соцсетей и мессенджеров: новые функции, "
-            "изменения дизайна, обновления. Среди выбранных обязательно должна быть минимум "
-            "одна такая новость (самая интересная, новости про Telegram в приоритете). "
-            "Её номер верни также в поле social_index.\n"
-        )
-
-    prompt = f"""Ты главный редактор Telegram-канала про игру Roblox для игроков.
-Ниже пронумерованные заголовки из игровых СМИ и блогов за последние часы.
-
+    prompt = f"""Ты главный редактор русскоязычного Telegram-канала про Roblox.
+Ниже заголовки новостей из игровых СМИ и блогов за последние часы.
 Недавно уже опубликовано:
 {recent}
 
-Выбери от 1 до {n} новостей. Обычно выбирай ОДНУ, самую важную. Две или три выбирай,
-только если это действительно крупные события (большое обновление платформы, громкий ивент,
-важное изменение правил или безопасности). Это должны быть РАЗНЫЕ истории:
-если несколько СМИ пишут об одном событии, выбери только одну из них.
-Не выбирай то, что повторяет уже опубликованное. Приоритет: обновления и новые функции платформы,
-события и ивенты, новые популярные игры, изменения правил и безопасности, важные новости компании.
-Промокоды и гайды бери, только если больше нет ничего важного. Избегай рекламы и пустых тем.
-Расположи выбранные по убыванию важности.
-{social_rule}
+Выбери от 1 до {count} новостей. Обычно выбирай ОДНУ, самую важную.
+Две или три выбирай только при действительно крупных событиях.
+Если несколько сайтов пишут об одном событии, выбери только один материал.
+Не выбирай повторы уже опубликованных новостей.
+Приоритет: обновления и новые функции Roblox, события и ивенты,
+новые популярные игры, изменения правил и безопасности, важные новости компании.
+Промокоды и гайды выбирай только если нет более важных новостей.
+Не выбирай рекламу и пустые темы. Расположи выбранные по важности.
+
 Заголовки:
 {listing}
 
-Ответь JSON: {{"indices": [числа], "social_index": число или null}}"""
+Ответь только JSON такого вида: {{"indices": [0, 2]}}.
+Укажи номера выбранных новостей. Не добавляй пояснения."""
 
     data = gemini_json(prompt)
-    output = []
+    selected = []
     for index in data.get("indices", []):
         try:
             index = int(index)
         except (TypeError, ValueError):
             continue
-        if 0 <= index < len(items) and items[index] not in output:
-            output.append(items[index])
-    output = output[:n]
-
-    # Гарантируем минимум одну новость про соцсети, если такие есть.
-    if has_social and not any(item.get("social") for item in output):
-        try:
-            social_index = int(data.get("social_index"))
-            extra = items[social_index] if items[social_index].get("social") else None
-        except (TypeError, ValueError, IndexError):
-            extra = next((item for item in items if item.get("social")), None)
-
-        if extra:
-            if len(output) >= n:
-                output[-1] = extra
-            else:
-                output.append(extra)
-
-    return output
-
-
-def rewrite(item):
-    prompt = f"""Перепиши новость для русскоязычного Telegram-канала про Roblox для игроков.
-Пиши простым живым языком, названия игр, героев и функций оставляй как в оригинале.
-Правила: пиши на русском своими словами (если оригинал на другом языке, переведи),
-только факты из текста ниже, ничего не выдумывай, нейтральный тон,
-2-4 коротких предложения, не больше 600 символов, без ссылок и без названия источника.
-
-Источник: {item['source']}
-Заголовок: {item['title']}
-Текст: {item['summary']}
-
-Ответь JSON: {{"headline": "короткий заголовок до 90 символов", "body": "текст новости"}}"""
-    return gemini_json(prompt)
+        if 0 <= index < len(items) and items[index] not in selected:
+            selected.append(items[index])
+    return selected[:count]
 
 
 def rewrite_many(items):
-    """Переписывает сразу несколько новостей одним запросом (экономит лимит)."""
     blocks = []
     for index, item in enumerate(items):
         blocks.append(
-            f"[{index}] Источник: {item['source']}\nЗаголовок: {item['title']}\nТекст: {item['summary']}"
+            f"[{index}] Заголовок: {item['title']}\nТекст: {item['summary']}"
         )
 
-    prompt = f"""Перепиши новости для русскоязычного Telegram-канала про Roblox для игроков.
-Пиши простым живым языком, названия игр, героев и функций оставляй как в оригинале.
-Правила для каждой: пиши на русском своими словами (если оригинал на другом языке,
-переведи), только факты из текста, ничего не выдумывай, нейтральный тон,
-2-4 коротких предложения, не больше 600 символов, без ссылок и без названия источника.
+    prompt = f"""Перепиши новости для русскоязычного Telegram-канала про Roblox.
+Пиши простым живым языком. Названия игр, героев и функций оставляй как в оригинале.
+Для каждой новости: пиши своими словами, если текст на другом языке — переведи.
+Используй только факты из предоставленного текста, ничего не выдумывай.
+Нейтральный тон, 2–4 коротких предложения, максимум 600 символов.
+Не добавляй ссылки, названия СМИ или упоминания источника.
 
 Новости:
 {chr(10).join(blocks)}
 
-Ответь JSON: {{"posts": [{{"headline": "заголовок до 90 символов", "body": "текст"}}]}}
-Ровно {len(items)} элементов, в том же порядке."""
+Ответь только JSON: {{"posts": [{{"headline": "заголовок до 90 символов", "body": "текст новости"}}]}}.
+Верни ровно {len(items)} элементов в том же порядке."""
 
-    posts = gemini_json(prompt)["posts"]
+    posts = gemini_json(prompt).get("posts", [])
     if len(posts) != len(items):
-        raise ValueError("число новостей в ответе Gemini не совпало с числом исходных новостей")
+        raise ValueError("Количество переписанных новостей не совпало с количеством выбранных")
     return posts
 
 
-# ---------- Telegram ----------
-def tg(method, **kwargs):
+def rewrite_one(item):
+    prompt = f"""Перепиши новость для русскоязычного Telegram-канала про Roblox.
+Пиши простым живым языком, названия игр, героев и функций оставляй как в оригинале.
+Используй только факты из текста, ничего не выдумывай.
+Нейтральный тон, 2–4 коротких предложения, максимум 600 символов.
+Не добавляй ссылки, названия СМИ или упоминания источника.
+
+Заголовок: {item['title']}
+Текст: {item['summary']}
+
+Ответь только JSON: {{"headline": "короткий заголовок до 90 символов", "body": "текст новости"}}."""
+    return gemini_json(prompt)
+
+
+# ========================= TELEGRAM =========================
+def telegram_request(method, **kwargs):
     response = requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}",
         data=kwargs,
         timeout=60,
     )
-
-    # Telegram может вернуть HTTP 200, но указать ok=false в JSON.
-    try:
-        result = response.json()
-    except ValueError:
-        result = {}
-
-    if not response.ok or result.get("ok") is False:
-        print("Telegram error:", response.text)
+    if not response.ok:
+        print(f"Telegram error ({method}): {response.text}")
     return response
 
 
 def publish(item, post):
-    headline = html.escape(post["headline"].strip())
-    body = html.escape(post["body"].strip())
-    source = (
-        f'<a href="{html.escape(item["link"], quote=True)}">'
-        f'{html.escape(item["source"])}</a>'
+    headline = html.escape(str(post["headline"]).strip())
+    body = html.escape(str(post["body"]).strip())
+    footer = (
+        f'<a href="{html.escape(FOOTER_URL, quote=True)}">'
+        f'{html.escape(FOOTER_TEXT)}</a>'
     )
-    text = f"<b>{headline}</b>\n\n{body}\n\n{source}"
 
-    if CHANNEL_URL:
-        text += f'\n\n<a href="{CHANNEL_URL}">{html.escape(CHANNEL_LINK_TEXT)}</a>'
-
+    # Источник новости намеренно не добавляется в публикацию.
+    message = f"<b>{headline}</b>\n\n{body}\n\n{footer}"
     image = item.get("image") or og_image(item["link"])
-    if image and len(text) <= 1024:
-        response = tg(
+
+    if image and len(message) <= 1024:
+        response = telegram_request(
             "sendPhoto",
             chat_id=CHANNEL_ID,
             photo=image,
-            caption=text,
+            caption=message,
             parse_mode="HTML",
         )
-        try:
-            if response.ok and response.json().get("ok") is True:
-                return True
-        except ValueError:
-            pass
-        print("Фото не прошло, отправляю без фото")
+        if response.ok:
+            return True
+        print("Фото не отправилось, пробую опубликовать текстом")
 
-    response = tg(
+    if image and len(message) > 1024:
+        photo_response = telegram_request(
+            "sendPhoto", chat_id=CHANNEL_ID, photo=image
+        )
+        if not photo_response.ok:
+            print("Не удалось отправить фото; пробую отправить текст")
+
+    response = telegram_request(
         "sendMessage",
         chat_id=CHANNEL_ID,
-        text=text,
+        text=message,
         parse_mode="HTML",
-        disable_web_page_preview="true" if not image else "false",
+        disable_web_page_preview="true",
     )
-    try:
-        return response.ok and response.json().get("ok") is True
-    except ValueError:
-        return False
+    return response.ok
 
 
-# ---------- Главная часть ----------
+# ========================= ОЧЕРЕДЬ И ЗАПУСК =========================
 def build_queue(state):
     items = collect(state)
     if not items:
@@ -477,18 +433,19 @@ def build_queue(state):
 
     chosen = choose_many(items, state, POSTS_PER_BATCH)
     if not chosen:
-        raise RuntimeError("Gemini не выбрал ни одной новости из найденных материалов")
+        print("Gemini не выбрал новости из найденных материалов")
+        return False
 
     try:
         posts = rewrite_many(chosen)
-    except Exception as exc:
-        print("Общий пересказ не удался, переписываю по одной:", exc)
+    except Exception as error:
+        print(f"Не удалось переписать подборку одним запросом: {error}")
         posts = []
         for item in chosen:
             try:
-                posts.append(rewrite(item))
-            except Exception as item_exc:
-                print("Не удалось переписать:", item["title"], item_exc)
+                posts.append(rewrite_one(item))
+            except Exception as one_error:
+                print(f"Не удалось переписать новость '{item['title']}': {one_error}")
                 posts.append(None)
 
     queue = []
@@ -499,17 +456,15 @@ def build_queue(state):
         entry["headline"] = post["headline"]
         entry["body"] = post["body"]
         queue.append(entry)
-        print("В очереди:", item["source"], "|", item["title"])
 
     if not queue:
-        raise RuntimeError(
-            "Новости найдены, но Gemini не смог подготовить ни одного поста. "
-            "Проверьте ошибки Gemini выше в логах."
-        )
+        print("Не удалось подготовить ни одной новости к публикации")
+        return False
 
     state["queue"] = queue
     state["built_at"] = time.time()
     save_state(state)
+    print(f"Подготовлено новостей: {len(queue)}")
     return True
 
 
@@ -521,20 +476,25 @@ def main():
         state["queue"] = []
 
     if not state["queue"]:
-        if not build_queue(state):
-            return  # Нет новых новостей — это нормальное завершение.
+        try:
+            if not build_queue(state):
+                print("Публиковать нечего")
+                return
+        except Exception as error:
+            print(f"Ошибка подготовки новостей: {error}")
+            sys.exit(1)
 
     first = True
     while state["queue"]:
         if not first:
-            time.sleep(30)  # пауза между постами одной подборки
+            time.sleep(30)
         first = False
 
         item = state["queue"][0]
         post = {"headline": item["headline"], "body": item["body"]}
 
         if not publish(item, post):
-            sys.exit("Не удалось опубликовать пост в Telegram. Проверьте токен, ID канала и права бота.")
+            sys.exit("Не удалось опубликовать новость в Telegram")
 
         state["queue"].pop(0)
         state["links"].append(item["link"])
