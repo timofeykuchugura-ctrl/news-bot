@@ -18,13 +18,9 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 # если основная модель недоступна или у неё кончился лимит, пробуем эти по очереди
 FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 
-# Подпись со ссылкой на ваш канал внизу каждого поста.
-# Поменяйте текст на своё название.
-CHANNEL_LINK_TEXT = "ВСЕ НОВОСТИ ⤵️"
-if CHANNEL_ID.startswith("@"):
-    CHANNEL_URL = "https://t.me/" + CHANNEL_ID[1:]
-else:
-    CHANNEL_URL = ""  # для закрытого канала вставьте ссылку-приглашение сюда
+# Подпись внизу каждого поста: текст и ссылка на ваш канал
+CHANNEL_LINK_TEXT = "ПОДПИСАТЬСЯ: TIMNEWS↩️"
+CHANNEL_URL = "https://t.me/timnews_roblox"
 
 STATE_FILE = "posted.json"
 MAX_AGE_HOURS = 24       # брать новости не старше N часов
@@ -244,22 +240,8 @@ def gemini_json(prompt):
 
 
 def choose_many(items, state, n):
-    def tag(it):
-        return ""
-
-    listing = "\n".join(
-        f"{i}. [{it['source']}]{tag(it)} {it['title']}" for i, it in enumerate(items)
-    )
+    listing = "\n".join(f"{i}. [{it['source']}] {it['title']}" for i, it in enumerate(items))
     recent = "\n".join(f"- {h}" for h in state["headlines"][-25:]) or "(пока ничего)"
-    has_social = False
-    social_rule = ""
-    if has_social:
-        social_rule = (
-            "\nЗаголовки с пометкой (СОЦСЕТИ) касаются соцсетей и мессенджеров: новые функции, "
-            "изменения дизайна, обновления. Среди выбранных обязательно должна быть минимум "
-            "одна такая новость (самая интересная, новости про Telegram в приоритете). "
-            "Её номер верни также в поле social_index.\n"
-        )
     prompt = f"""Ты главный редактор Telegram-канала про игру Roblox для игроков.
 Ниже пронумерованные заголовки из игровых СМИ и блогов за последние часы.
 
@@ -270,14 +252,15 @@ def choose_many(items, state, n):
 только если это действительно крупные события (большое обновление платформы, громкий ивент,
 важное изменение правил или безопасности). Это должны быть РАЗНЫЕ истории:
 если несколько СМИ пишут об одном событии, выбери только одну из них.
-Не выбирай то, что повторяет уже опубликованное. Приоритет: обновления и новые функции платформы, события и ивенты, новые популярные игры,
-изменения правил и безопасности, важные новости компании. Промокоды и гайды бери, только если
-больше нет ничего важного. Избегай рекламы и пустых тем. Расположи выбранные по убыванию важности.
-{social_rule}
+Не выбирай то, что повторяет уже опубликованное. Приоритет: обновления и новые функции платформы,
+события и ивенты, новые популярные игры, изменения правил и безопасности, важные новости компании.
+Промокоды и гайды бери, только если больше нет ничего важного. Избегай рекламы и пустых тем.
+Расположи выбранные по убыванию важности.
+
 Заголовки:
 {listing}
 
-Ответь JSON: {{"indices": [числа], "social_index": число или null}}"""
+Ответь JSON: {{"indices": [числа]}}"""
     data = gemini_json(prompt)
     out = []
     for i in data.get("indices", []):
@@ -287,26 +270,13 @@ def choose_many(items, state, n):
             continue
         if 0 <= i < len(items) and items[i] not in out:
             out.append(items[i])
-    out = out[:n]
-
-    # гарантируем минимум одну новость про соцсети, если такие есть
-    if has_social and not any(it.get("social") for it in out):
-        try:
-            si = int(data.get("social_index"))
-            extra = items[si] if items[si].get("social") else None
-        except (TypeError, ValueError, IndexError):
-            extra = next((it for it in items if it.get("social")), None)
-        if extra:
-            if len(out) >= n:
-                out[-1] = extra
-            else:
-                out.append(extra)
-    return out
+    return out[:n]
 
 
 def rewrite(item):
     prompt = f"""Перепиши новость для русскоязычного Telegram-канала про Roblox для игроков.
 Пиши простым живым языком, названия игр, героев и функций оставляй как в оригинале.
+Добавь немного смайликов: один уместный в начале заголовка и один-два в тексте (не больше трёх на весь пост).
 Правила: пиши на русском своими словами (если оригинал на другом языке, переведи),
 только факты из текста ниже, ничего не выдумывай, нейтральный тон,
 2-4 коротких предложения, не больше 600 символов, без ссылок и без названия источника.
@@ -328,6 +298,7 @@ def rewrite_many(items):
         )
     prompt = f"""Перепиши новости для русскоязычного Telegram-канала про Roblox для игроков.
 Пиши простым живым языком, названия игр, героев и функций оставляй как в оригинале.
+Добавь немного смайликов: один уместный в начале заголовка и один-два в тексте (не больше трёх на пост).
 Правила для каждой: пиши на русском своими словами (если оригинал на другом языке,
 переведи), только факты из текста, ничего не выдумывай, нейтральный тон,
 2-4 коротких предложения, не больше 600 символов, без ссылок и без названия источника.
@@ -356,10 +327,8 @@ def tg(method, **kwargs):
 def publish(item, post):
     headline = html.escape(post["headline"].strip())
     body = html.escape(post["body"].strip())
-    source = f'🔗 <a href="{html.escape(item["link"], quote=True)}">{html.escape(item["source"])}</a>'
-    text = f"<b>{headline}</b>\n\n{body}\n\n{source}"
-    if CHANNEL_URL:
-        text += f'\n\n📲 <a href="{CHANNEL_URL}">{html.escape(CHANNEL_LINK_TEXT)}</a>'
+    text = f"<b>{headline}</b>\n\n{body}"
+    text += f'\n\n<a href="{CHANNEL_URL}">{html.escape(CHANNEL_LINK_TEXT)}</a>'
 
     image = item["image"] or og_image(item["link"])
     if image and len(text) <= 1024:
