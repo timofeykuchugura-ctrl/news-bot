@@ -103,23 +103,37 @@ def entry_time(entry):
     return datetime.fromtimestamp(calendar.timegm(t), tz=timezone.utc)
 
 
+BAD_IMAGE_RE = re.compile(r"emoji|twemoji|smilies|avatar|gravatar|favicon|logo-?small", re.I)
+
+
+def good_image(url):
+    """Отбрасываем смайлики, аватарки и иконки."""
+    return bool(url) and url.startswith("http") and not BAD_IMAGE_RE.search(url)
+
+
 def find_image(entry):
     for key in ("media_content", "media_thumbnail"):
         for m in entry.get(key, []) or []:
-            if m.get("url"):
+            if good_image(m.get("url")):
                 return m["url"]
     for link in entry.get("links", []) or []:
-        if link.get("type", "").startswith("image") and link.get("href"):
+        if link.get("type", "").startswith("image") and good_image(link.get("href")):
             return link["href"]
     for enc in entry.get("enclosures", []) or []:
-        if enc.get("type", "").startswith("image") and enc.get("href"):
+        if enc.get("type", "").startswith("image") and good_image(enc.get("href")):
             return enc["href"]
     blob = entry.get("summary", "") or ""
     for c in entry.get("content", []) or []:
         blob += c.get("value", "")
-    m = re.search(r'<img[^>]+src=["\']([^"\']+)', blob)
-    if m:
-        return m.group(1)
+    for tag in re.findall(r"<img[^>]*>", blob):
+        if re.search(r"emoji|smilies|avatar", tag, re.I):
+            continue
+        size = re.search(r'(?:width|height)=["\']?(\d+)', tag)
+        if size and int(size.group(1)) < 100:
+            continue
+        src = re.search(r'src=["\']([^"\']+)', tag)
+        if src and good_image(src.group(1)):
+            return src.group(1)
     return None
 
 
@@ -131,7 +145,8 @@ def og_image(url):
         ) or re.search(
             r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', r.text
         )
-        return html.unescape(m.group(1)) if m else None
+        found = html.unescape(m.group(1)) if m else None
+        return found if good_image(found) else None
     except requests.RequestException:
         return None
 
