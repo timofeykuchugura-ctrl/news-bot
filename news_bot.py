@@ -31,7 +31,7 @@ FOOTER_TEXT = "ПОДПИСАТЬСЯ: TIMNEWS↩️"
 FOOTER_URL = "https://t.me/timnews_roblox"
 
 STATE_FILE = "posted.json"
-MAX_AGE_HOURS = 24
+MAX_AGE_HOURS = 48
 POSTS_PER_BATCH = 3
 QUEUE_MAX_AGE_MIN = 100
 PER_FEED = 15
@@ -41,11 +41,18 @@ UA = {"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"}
 
 # Основные RSS-ленты Roblox.
 FEEDS = {
+    "Roblox DevForum — Announcements": "https://devforum.roblox.com/c/updates/announcements/36.rss",
+    "Roblox DevForum — Updates": "https://devforum.roblox.com/c/updates/45.rss",
+    "Roblox Blog": "https://blog.roblox.com/feed/",
     "Try Hard Guides": "https://tryhardguides.com/tag/roblox/feed/",
     "Gamer Journalist": "https://gamerjournalist.com/roblox/feed",
     "Pro Game Guides": "https://progameguides.com/roblox/feed/",
-    "Roblox DevForum": "https://devforum.roblox.com/c/updates/announcements/36.rss",
-    "Roblox Blog": "https://blog.roblox.com/feed/",
+    "Bloxidex": "https://bloxidex.com/rss.xml",
+}
+PLATFORM_SOURCES = {
+    "Roblox DevForum — Announcements",
+    "Roblox DevForum — Updates",
+    "Roblox Blog",
 }
 
 # Популярность берём из актуальных подборок Roblox Discover, а не из
@@ -54,15 +61,19 @@ FEEDS = {
 ROBLOX_DISCOVER_URL = "https://apis.roblox.com/explore-api/v1/get-sort-content"
 ROBLOX_SORTS = ("top-playing-now", "top-trending")
 MIN_LIVE_PLAYERS = 1000
-FILTER_VERSION = 2
+FILTER_VERSION = 3
 
 # Оставляем только материалы, похожие на новость, а не рекламное описание игры.
 NEWS_SIGNAL = re.compile(
     r"\b(update|updated|patch|event|codes?|redeem|release|released|"
     r"shutdown|banned|maintenance|leak|new feature|change|nerf|buff|"
+    r"introduc(?:es|ed|ing)?|launch(?:es|ed)?|announc(?:es|ed|ement)?|"
+    r"returns?|reveals?|unveil(?:s|ed)?|available now|free item|limited|"
+    r"outage|server issue|tournament|season|quest|admin abuse|new map|new mode|new area|new item|item drop|challenge|free avatar|avatar item|"
     r"добавил[иа]?|обновлени[ея]|ивент|событи[ея]|код[ыов]?|"
     r"промокод[ыов]?|вышел|вышла|запустил[иа]?|изменени[ея]|"
-    r"отключени[ея]|техработ[ы]?|утечк[аи])\b",
+    r"отключени[ея]|техработ[ы]?|утечк[аи]|турнир|сезон|квест|"
+    r"бесплатн[ыое]|предмет|возвращени[ея]|анонс|добавлен[ыо])\b",
     re.I,
 )
 PROMO_LANGUAGE = re.compile(
@@ -256,24 +267,22 @@ def is_roblox_related(title, summary, popular_games):
     return any(name and name in text for name in popular_games)
 
 
+
+
 def collect(state):
     seen_links = set(state["links"])
     seen_titles = set(state["titles"])
-    now = datetime.now(timezone.utc)
-    regular_items = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
+    collected = []
 
     try:
         popular_games = fetch_popular_roblox_games()
     except Exception as error:
-        print(f"[skip] Проверка популярности не прошла: {error}")
-        return []
+        print(f"[skip] Проверка популярных игр недоступна: {error}")
+        print("[info] Продолжаю собирать официальные новости платформы; игровые новости пропущу")
+        popular_games = {}
 
-    # Используем только Roblox-источники — общие игровые СМИ отключены.
-    sources = list(FEEDS.items())
-
-    for name, url in sources:
-        cutoff = now - timedelta(hours=MAX_AGE_HOURS)
-
+    for name, url in FEEDS.items():
         try:
             response = requests.get(url, headers=UA, timeout=20)
             response.raise_for_status()
@@ -295,26 +304,33 @@ def collect(state):
             if published and published < cutoff:
                 continue
 
-            summary = strip_tags(entry.get("summary", ""))[:1500]
-            if not is_roblox_related(title, summary, popular_games):
+            summary = strip_tags(entry.get("summary", ""))
+            for part in entry.get("content", []) or []:
+                summary += " " + strip_tags(part.get("value", ""))
+            summary = summary[:2500]
+
+            platform_news = name in PLATFORM_SOURCES
+            if not platform_news and (
+                not popular_games or not is_roblox_related(title, summary, popular_games)
+            ):
                 continue
             if not has_real_news(title, summary):
-                print(f"[skip] Не похоже на настоящую новость: {title}")
+                print(f"[skip] Не похоже на новость: {title}")
                 continue
 
-            item = {
+            collected.append({
                 "source": name,
                 "title": title,
                 "summary": summary,
                 "link": link,
                 "image": find_image(entry),
-            }
-            regular_items.append(item)
+                "kind": "platform" if platform_news else "popular_game",
+            })
             count += 1
 
         print(f"[ok] {name}: {count} новых подходящих новостей")
 
-    return spread(regular_items, MAX_CANDIDATES)
+    return spread(collected, MAX_CANDIDATES)
 
 
 # ========================= GEMINI =========================
@@ -385,7 +401,7 @@ def gemini_json(prompt):
 
 def choose_many(items, state, count):
     listing = "\n".join(
-        f"{index}. {item['title']}" for index, item in enumerate(items)
+        f"{index}. {item['title']} — {item.get('summary', '')[:500]}" for index, item in enumerate(items)
     )
     recent = "\n".join(
         f"- {headline}" for headline in state["headlines"][-25:]
@@ -400,10 +416,14 @@ def choose_many(items, state, count):
 Две или три выбирай только при действительно крупных событиях.
 Если несколько сайтов пишут об одном событии, выбери только один материал.
 Не выбирай повторы уже опубликованных новостей.
-Выбирай только реальные новости об играх Roblox, которые уже прошли
-автоматическую проверку по актуальным топ-подборкам Roblox Discover.
-Не выбирай малоизвестные режимы, рекламные описания, обзоры без нового события,
-пустые анонсы и тексты в стиле «отправляйтесь в приключение».
+Выбирай реальные новости Roblox всех типов: крупные события и ивенты;
+обновления популярных игр, новые сезоны, карты, режимы и функции;
+изменения платформы, аватары, предметы и бесплатные награды;
+турниры, квесты, временные активности, рабочие коды и важные объявления.
+Для отдельных игр используй только названия из актуальных подборок Roblox Discover.
+Для платформенных новостей и крупных Roblox-ивентов конкретная игра не нужна.
+Не выбирай рекламные описания, обзоры без нового события, пустые анонсы
+и тексты в стиле «отправляйтесь в приключение».
 Не выбирай новости о Minecraft, Fortnite, GTA или играх вне Roblox.
 Если в заголовке обещаны коды, выбирай материал только если в исходном тексте
 действительно указаны сами коды. Никогда не придумывай коды.
@@ -435,6 +455,8 @@ def rewrite_many(items):
         )
 
     prompt = f"""Перепиши новости для русскоязычного Telegram-канала только про Roblox.
+Подходят новости о платформе, крупных ивентах, популярных играх, обновлениях,
+сезонах, предметах, турнирах, квестах, кодах и важных изменениях.
 Пиши простым живым языком. Названия игр, героев и функций оставляй как в оригинале.
 Для каждой новости: пиши своими словами, если текст на другом языке — переведи.
 Используй только факты из предоставленного текста, ничего не выдумывай.
@@ -457,6 +479,8 @@ def rewrite_many(items):
 
 def rewrite_one(item):
     prompt = f"""Перепиши новость для русскоязычного Telegram-канала только про Roblox.
+Подходят новости о платформе, крупных ивентах, популярных играх, обновлениях,
+сезонах, предметах, турнирах, квестах, кодах и важных изменениях.
 Пиши простым живым языком, названия игр, героев и функций оставляй как в оригинале.
 Используй только факты из текста, ничего не выдумывай.
 Нейтральный тон, 2–4 коротких предложения, максимум 600 символов.
