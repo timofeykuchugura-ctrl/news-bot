@@ -38,7 +38,7 @@ DRAFTS_FILE = "drafts.json"       # черновики, ждущие вашег�
 MAX_AGE_HOURS = 48
 POSTS_PER_BATCH = 3
 QUEUE_MAX_AGE_MIN = 100
-PER_FEED = 15
+PER_FEED = 40
 MAX_CANDIDATES = 70
 
 # Только новости про игры Roblox. Чтобы добавить новости самой платформы
@@ -46,9 +46,17 @@ MAX_CANDIDATES = 70
 ALLOW_PLATFORM_NEWS = False
 # Игра считается популярной, если в топах Roblox у неё не меньше столько игроков онлайн.
 MIN_LIVE_PLAYERS = 5000
-FILTER_VERSION = 4
+FILTER_VERSION = 5
 
-UA = {"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"}
+# Заголовки как у обычного браузера: так сайты реже блокируют бота (ошибка 403).
+UA = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 # Ленты с новостями об играх Roblox.
 GAME_FEEDS = {
@@ -56,6 +64,19 @@ GAME_FEEDS = {
     "Gamer Journalist": "https://gamerjournalist.com/roblox/feed",
     "Pro Game Guides": "https://progameguides.com/roblox/feed/",
     "Bloxidex": "https://bloxidex.com/rss.xml",
+}
+# Большие игровые сайты. Из них берутся только новости, где названа популярная игра Roblox.
+GENERAL_FEEDS = {
+    "GameRant": "https://gamerant.com/feed/",
+    "TheGamer": "https://www.thegamer.com/feed/",
+    "Dexerto": "https://www.dexerto.com/feed/",
+    "PC Gamer": "https://www.pcgamer.com/rss/",
+    "Polygon": "https://www.polygon.com/rss/index.xml",
+    "IGN": "https://feeds.ign.com/ign/news",
+    "GameSpot": "https://www.gamespot.com/feeds/news/",
+    "Eurogamer": "https://www.eurogamer.net/feed",
+    "Insider Gaming": "https://insider-gaming.com/feed/",
+    "Pocket Gamer": "https://www.pocketgamer.com/rss/",
 }
 # Ленты платформы (используются только при ALLOW_PLATFORM_NEWS = True).
 PLATFORM_FEEDS = {
@@ -85,43 +106,41 @@ GENERIC_NAMES = {
     "obby", "beta", "test", "classic", "home", "play", "world",
 }
 
-# Оставляем только материалы, похожие на новость, а не рекламное описание игры.
+# Нужны только: обновления популярных игр, бесплатные внутриигровые вещи, ивенты.
 NEWS_SIGNAL = re.compile(
-    r"\b(update|updated|patch|event|codes?|redeem|release|released|"
-    r"shutdown|banned|maintenance|leak|new feature|change|nerf|buff|"
-    r"introduc(?:es|ed|ing)?|launch(?:es|ed)?|announc(?:es|ed|ement)?|"
-    r"returns?|reveals?|unveil(?:s|ed)?|available now|free item|limited|"
-    r"outage|server issue|tournament|season|quest|admin abuse|new map|new mode|"
-    r"new area|new item|item drop|challenge|free avatar|avatar item|"
-    r"adds?|added|new pets?|new boss|new world|new weapons?|new island|drops?|"
-    r"collab|crossover|rework|overhaul|expansion|live now|begins?|starts?|"
-    r"добавил[иа]?|обновлени[ея]|ивент|событи[ея]|код[ыов]?|"
-    r"промокод[ыов]?|вышел|вышла|запустил[иа]?|изменени[ея]|"
-    r"отключени[ея]|техработ[ы]?|утечк[аи]|турнир|сезон|квест|"
-    r"бесплатн[ыое]|предмет|возвращени[ея]|анонс|добавлен[ыо])\b",
+    r"\b(updates?|updated|patch(?:es)?|releases?|released|season|"
+    r"new (?:maps?|modes?|areas?|worlds?|islands?|bosse?s?|pets?|weapons?|items?|"
+    r"features?|class(?:es)?|characters?|skins?|raids?|dungeons?|levels?)|"
+    r"adds?|added|rework(?:ed)?|overhaul|expansion|collab(?:oration)?|crossover|"
+    r"events?|limited[- ]time|live now|"
+    r"free (?:items?|ugc|avatars?|rewards?|pets?|skins?|accessor(?:y|ies)|gear|hats?|cosmetics?)|"
+    r"tournaments?|quests?|challenges?|returns?|launch(?:es|ed)?|introduc(?:es|ed|ing)?|"
+    r"maintenance|shutdown|outage)\b",
     re.I,
 )
 PROMO_LANGUAGE = re.compile(
     r"\b(adventure|explore|become a legend|choose your side|"
-    r"discover the world|start your journey|погрузись в приключени[ея]|"
-    r"отправляйся в приключени[ея]|исследуй мир|стань легендой)\b",
+    r"discover the world|start your journey)\b",
     re.I,
 )
-CODE_WORD = re.compile(r"\b(codes?|коды?|кодов|промокод[ыов]?)\b", re.I)
-CODE_TOKEN = re.compile(r"(?<![A-ZА-Я0-9])[A-Z0-9]{4,20}(?![A-ZА-Я0-9])", re.I)
-CODE_LABEL = re.compile(r"\b(?:codes?|промокод[ыов]?)\s*[:：-]\s*", re.I)
+# Не нужно: гайды, списки и коды.
+GUIDE_RE = re.compile(
+    r"\b(guides?|tier ?lists?|walkthrough|tutorials?|tips?|tricks?|beginners?|"
+    r"best [a-z]+|ranked|list of|wiki|explained|reviews?|codes?|redeem|coupons?)\b",
+    re.I,
+)
+HOW_TO_RE = re.compile(r"\bhow to\b", re.I)
+FREE_RE = re.compile(r"\bfree\b", re.I)
+# Не нужно: мерч, конкурсы, розыгрыши и мероприятия вне игр.
+OFFGAME_RE = re.compile(
+    r"\b(merch(?:andise)?|giveaways?|sweepstakes|contests?|gift ?cards?|plush(?:ies)?|"
+    r"toys?|collectibles?|walmart|target|amazon|convention|conference|rdc|meetup|"
+    r"discounts?|sale)\b",
+    re.I,
+)
 
 # Картинки, которые не годятся для поста (смайлики, аватарки, иконки).
 BAD_IMAGE_RE = re.compile(r"emoji|twemoji|smilies|avatar|gravatar|favicon|logo-?small", re.I)
-
-
-def has_actual_codes(text):
-    """Ищет код только рядом с явной подписью Codes/Промокоды."""
-    for match in CODE_LABEL.finditer(text or ""):
-        fragment = (text or "")[match.end():match.end() + 100]
-        if CODE_TOKEN.search(fragment):
-            return True
-    return False
 
 
 # ========================= СОСТОЯНИЕ =========================
@@ -334,15 +353,21 @@ def find_popular_game(title, summary, popular):
     return best
 
 
+def is_unwanted(title):
+    """Гайды, списки кодов, мерч, конкурсы и мероприятия вне игр."""
+    if GUIDE_RE.search(title) or OFFGAME_RE.search(title):
+        return True
+    if HOW_TO_RE.search(title) and not FREE_RE.search(title):
+        return True
+    return False
+
+
 def has_real_news(title, summary):
-    """Отсекает рекламные описания и обещания кодов без самих кодов."""
+    """Нужно реальное событие: обновление, бесплатная вещь или ивент, а не реклама."""
     text = f"{title} {summary}"
     if not NEWS_SIGNAL.search(text):
         return False
     if PROMO_LANGUAGE.search(text) and not NEWS_SIGNAL.search(title):
-        return False
-    # Нельзя обещать новые коды, если в исходном материале нет самих кодов.
-    if CODE_WORD.search(title) and not has_actual_codes(summary):
         return False
     return True
 
@@ -355,6 +380,7 @@ def collect(state):
 
     popular = get_popular_games()
     sources = dict(GAME_FEEDS)
+    sources.update(GENERAL_FEEDS)
     if ALLOW_PLATFORM_NEWS:
         sources.update(PLATFORM_FEEDS)
 
@@ -368,17 +394,26 @@ def collect(state):
             print(f"[skip] {name}: {error}")
             continue
 
+        entries = feed.entries[:PER_FEED]
+        if not entries:
+            kind = response.headers.get("content-type", "?")
+            print(f"[warn] {name}: лента пустая или сайт отдал заглушку (тип: {kind})")
+            continue
+
         count = 0
-        for entry in feed.entries[:PER_FEED]:
+        stat = {"старые": 0, "уже были": 0, "не про игру": 0, "гайд/мерч": 0, "не новость": 0}
+        for entry in entries:
             link = entry.get("link")
             title = strip_tags(entry.get("title", ""))
             if not link or not title:
                 continue
             if link in seen_links or norm(title) in seen_titles:
+                stat["уже были"] += 1
                 continue
 
             published = entry_time(entry)
             if published and published < cutoff:
+                stat["старые"] += 1
                 continue
 
             summary = strip_tags(entry.get("summary", ""))
@@ -390,8 +425,14 @@ def collect(state):
             if not platform_news:
                 game = find_popular_game(title, summary, popular)
                 if not game:
+                    stat["не про игру"] += 1
                     continue  # не про популярную игру
+            if is_unwanted(title):
+                stat["гайд/мерч"] += 1
+                print(f"[skip] Гайд, коды, мерч или конкурс: {title}")
+                continue
             if not has_real_news(title, summary):
+                stat["не новость"] += 1
                 print(f"[skip] Не похоже на новость: {title}")
                 continue
 
@@ -405,7 +446,8 @@ def collect(state):
             })
             count += 1
 
-        print(f"[ok] {name}: {count} подходящих новостей")
+        details = ", ".join(f"{k} {v}" for k, v in stat.items() if v)
+        print(f"[ok] {name}: подходит {count} из {len(entries)} ({details or 'ничего не отсеяно'})")
 
     return spread(collected, MAX_CANDIDATES)
 
@@ -495,15 +537,18 @@ def choose_many(items, state, count):
 Две или три выбирай только при действительно крупных событиях.
 Если несколько сайтов пишут об одном событии, выбери только один материал.
 Не выбирай повторы уже опубликованных новостей.
-Подходят только новости про конкретные популярные игры Roblox: крупные обновления,
-новые сезоны, карты, режимы, питомцы, боссы, предметы, ивенты, коллаборации,
-турниры, квесты, бесплатные награды и рабочие коды.
-Не выбирай новости про саму платформу Roblox, Roblox Studio, разработчиков, правила,
-безопасность и бизнес, а также рекламные описания игр, обзоры без нового события
-и пустые анонсы.
-Если в заголовке обещаны коды, выбирай материал только если в исходном тексте
-действительно указаны сами коды. Никогда не придумывай коды.
-Предпочитай новости про самые популярные и обсуждаемые игры.
+
+ПОДХОДЯТ только новости трёх видов:
+1) обновления популярных игр: патчи, сезоны, новые карты, режимы, боссы, питомцы,
+   оружие, механики;
+2) бесплатные внутриигровые вещи и награды: бесплатные предметы, питомцы, UGC;
+3) внутриигровые ивенты, коллаборации и временные активности.
+
+НЕ ПОДХОДЯТ: гайды, туториалы, tier-листы, списки и промокоды; новости самой платформы
+Roblox, Roblox Studio, разработчиков, правил и безопасности; мерч, розыгрыши, конкурсы,
+подарочные карты и мероприятия вне игр; обзоры, рекламные описания игр и пустые анонсы;
+игры не из Roblox.
+Предпочитай самые популярные и обсуждаемые игры.
 Расположи выбранные новости по важности.
 
 Заголовки:
@@ -538,8 +583,7 @@ def rewrite_many(items):
 (не больше трёх на весь пост).
 Для каждой новости: пиши своими словами, если текст на другом языке, переведи.
 Используй только факты из предоставленного текста, ничего не выдумывай.
-Не превращай рекламное описание игры в новость. Не придумывай промокоды.
-Если в исходном тексте нет конкретных кодов, не пиши о новых кодах.
+Не превращай рекламное описание игры в новость. Не упоминай промокоды и гайды.
 Нейтральный тон, 2-4 коротких предложения, максимум 600 символов.
 Не добавляй ссылки, названия СМИ или упоминания источника.
 
@@ -560,7 +604,7 @@ def rewrite_one(item):
 Пиши простым живым языком, названия игр, героев и функций оставляй как в оригинале.
 Добавь немного смайликов: один уместный в начале заголовка и один-два в тексте
 (не больше трёх на весь пост).
-Используй только факты из текста, ничего не выдумывай, не придумывай коды.
+Используй только факты из текста, ничего не выдумывай. Не упоминай промокоды.
 Нейтральный тон, 2-4 коротких предложения, максимум 600 символов.
 Не добавляй ссылки, названия СМИ или упоминания источника.
 
@@ -666,9 +710,6 @@ def make_entries(state):
         body = str(post.get("body", "")).strip()
         if not headline or not body:
             print(f"[skip] Пустая публикация: {item['title']}")
-            continue
-        if CODE_WORD.search(headline) and not has_actual_codes(item.get("summary", "")):
-            print(f"[skip] Заголовок обещает коды, но кодов нет: {headline}")
             continue
         entry = dict(item)
         entry["headline"] = headline
