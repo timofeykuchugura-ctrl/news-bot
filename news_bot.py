@@ -58,13 +58,22 @@ UA = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Ленты с новостями об играх Roblox.
+# Ленты с новостями об играх Roblox (сайты, блокирующие бота, убраны).
 GAME_FEEDS = {
     "Try Hard Guides": "https://tryhardguides.com/tag/roblox/feed/",
-    "Gamer Journalist": "https://gamerjournalist.com/roblox/feed",
-    "Pro Game Guides": "https://progameguides.com/roblox/feed/",
-    "Bloxidex": "https://bloxidex.com/rss.xml",
 }
+# Поиск свежих новостей по сотням сайтов через Google News.
+USE_GOOGLE_NEWS = True
+GOOGLE_NEWS_URL = "https://news.google.com/rss/search"
+GOOGLE_NEWS_WHEN = "2d"          # за какой период искать
+GOOGLE_TOP_GAMES = 12            # по сколько самым популярным играм делать отдельный запрос
+GOOGLE_GENERIC_QUERIES = [
+    "Roblox game update event",
+    "Roblox free item event",
+    "Roblox new season update",
+]
+# Если у новости нет картинки, берём иконку игры с Roblox.
+UNIVERSE_IDS = {}
 # Большие игровые сайты. Из них берутся только новости, где названа популярная игра Roblox.
 GENERAL_FEEDS = {
     "GameRant": "https://gamerant.com/feed/",
@@ -296,6 +305,9 @@ def fetch_live_games():
                 clean = clean_game_name(name)
                 if clean:
                     live[clean] = max(int(players), live.get(clean, 0))
+                    universe = value.get("universeId")
+                    if isinstance(universe, (int, str)) and str(universe).isdigit():
+                        UNIVERSE_IDS[clean] = str(universe)
             for child in value.values():
                 walk(child)
         elif isinstance(value, list):
@@ -353,6 +365,45 @@ def find_popular_game(title, summary, popular):
     return best
 
 
+def game_icon(game):
+    """Официальная иконка игры с Roblox (если известен её universeId)."""
+    universe = UNIVERSE_IDS.get(game or "")
+    if not universe:
+        return None
+    try:
+        response = requests.get(
+            "https://thumbnails.roblox.com/v1/games/icons",
+            params={
+                "universeIds": universe,
+                "returnPolicy": "PlaceHolder",
+                "size": "512x512",
+                "format": "Png",
+                "isCircular": "false",
+            },
+            headers=UA,
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json().get("data") or []
+        url = data[0].get("imageUrl") if data else None
+        return url if url and url.startswith("http") else None
+    except (requests.RequestException, ValueError, KeyError, IndexError, AttributeError):
+        return None
+
+
+def resolve_image(item):
+    """Картинка новости: из ленты, со страницы статьи или иконка игры."""
+    if item.get("image"):
+        return item["image"]
+    image = None
+    if item.get("source") != "Google News":  # у ссылок Google News своей картинки нет
+        image = og_image(item["link"])
+    if not image:
+        image = game_icon(item.get("game"))
+    item["image"] = image
+    return image
+
+
 def is_unwanted(title):
     """Гайды, списки кодов, мерч, конкурсы и мероприятия вне игр."""
     if GUIDE_RE.search(title) or OFFGAME_RE.search(title):
@@ -372,32 +423,62 @@ def has_real_news(title, summary):
     return True
 
 
+def google_queries(popular):
+    queries = list(GOOGLE_GENERIC_QUERIES)
+    top = sorted(popular.items(), key=lambda kv: kv[1], reverse=True)[:GOOGLE_TOP_GAMES]
+    for name, _players in top:
+        queries.append(f'Roblox "{name}" update OR event OR free')
+    return queries
+
+
+def read_entries(name, requests_to_make):
+    """Читает одну или несколько лент. Возвращает список записей."""
+    entries, seen = [], set()
+    last_response = None
+    for url, params in requests_to_make:
+        try:
+            response = requests.get(url, params=params, headers=UA, timeout=20)
+            response.raise_for_status()
+            last_response = response
+            feed = feedparser.parse(response.content)
+        except Exception as error:
+            print(f"[skip] {name}: {error}")
+            continue
+        for entry in feed.entries[:PER_FEED]:
+            key = entry.get("link")
+            if key and key not in seen:
+                seen.add(key)
+                entries.append(entry)
+    if not entries and last_response is not None:
+        kind = last_response.headers.get("content-type", "?")
+        print(f"[warn] {name}: лента пустая или сайт отдал заглушку (тип: {kind})")
+    return entries
+
+
 def collect(state):
     seen_links = set(state["links"])
     seen_titles = set(state["titles"])
     cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
     collected = []
+    batch_titles = set()
 
     popular = get_popular_games()
-    sources = dict(GAME_FEEDS)
-    sources.update(GENERAL_FEEDS)
+    sources = [(n, [(u, None)]) for n, u in GAME_FEEDS.items()]
+    sources += [(n, [(u, None)]) for n, u in GENERAL_FEEDS.items()]
     if ALLOW_PLATFORM_NEWS:
-        sources.update(PLATFORM_FEEDS)
+        sources += [(n, [(u, None)]) for n, u in PLATFORM_FEEDS.items()]
+    if USE_GOOGLE_NEWS:
+        calls = [
+            (GOOGLE_NEWS_URL, {"q": f"{q} when:{GOOGLE_NEWS_WHEN}", "hl": "en-US", "gl": "US", "ceid": "US:en"})
+            for q in google_queries(popular)
+        ]
+        sources.append(("Google News", calls))
 
-    for name, url in sources.items():
+    for name, requests_to_make in sources:
         platform_news = name in PLATFORM_FEEDS
-        try:
-            response = requests.get(url, headers=UA, timeout=20)
-            response.raise_for_status()
-            feed = feedparser.parse(response.content)
-        except Exception as error:
-            print(f"[skip] {name}: {error}")
-            continue
-
-        entries = feed.entries[:PER_FEED]
+        is_google = name == "Google News"
+        entries = read_entries(name, requests_to_make)
         if not entries:
-            kind = response.headers.get("content-type", "?")
-            print(f"[warn] {name}: лента пустая или сайт отдал заглушку (тип: {kind})")
             continue
 
         count = 0
@@ -405,9 +486,14 @@ def collect(state):
         for entry in entries:
             link = entry.get("link")
             title = strip_tags(entry.get("title", ""))
+            if is_google:
+                # Google добавляет к заголовку « - название сайта»
+                match = re.match(r"^(.*\S) - [^-]{2,40}$", title)
+                if match:
+                    title = match.group(1).strip()
             if not link or not title:
                 continue
-            if link in seen_links or norm(title) in seen_titles:
+            if link in seen_links or norm(title) in seen_titles or norm(title) in batch_titles:
                 stat["уже были"] += 1
                 continue
 
@@ -416,10 +502,13 @@ def collect(state):
                 stat["старые"] += 1
                 continue
 
-            summary = strip_tags(entry.get("summary", ""))
-            for part in entry.get("content", []) or []:
-                summary += " " + strip_tags(part.get("value", ""))
-            summary = summary[:2500]
+            if is_google:
+                summary = title  # у Google News есть только заголовок
+            else:
+                summary = strip_tags(entry.get("summary", ""))
+                for part in entry.get("content", []) or []:
+                    summary += " " + strip_tags(part.get("value", ""))
+                summary = summary[:2500]
 
             game = None
             if not platform_news:
@@ -436,12 +525,13 @@ def collect(state):
                 print(f"[skip] Не похоже на новость: {title}")
                 continue
 
+            batch_titles.add(norm(title))
             collected.append({
                 "source": name,
                 "title": title,
                 "summary": summary,
                 "link": link,
-                "image": find_image(entry),
+                "image": None if is_google else find_image(entry),
                 "game": game or "",
             })
             count += 1
@@ -583,6 +673,7 @@ def rewrite_many(items):
 (не больше трёх на весь пост).
 Для каждой новости: пиши своими словами, если текст на другом языке, переведи.
 Используй только факты из предоставленного текста, ничего не выдумывай.
+Если текста почти нет (только заголовок), напиши 1-2 коротких предложения строго по заголовку.
 Не превращай рекламное описание игры в новость. Не упоминай промокоды и гайды.
 Нейтральный тон, 2-4 коротких предложения, максимум 600 символов.
 Не добавляй ссылки, названия СМИ или упоминания источника.
@@ -605,6 +696,7 @@ def rewrite_one(item):
 Добавь немного смайликов: один уместный в начале заголовка и один-два в тексте
 (не больше трёх на весь пост).
 Используй только факты из текста, ничего не выдумывай. Не упоминай промокоды.
+Если текста почти нет (только заголовок), напиши 1-2 коротких предложения строго по заголовку.
 Нейтральный тон, 2-4 коротких предложения, максимум 600 символов.
 Не добавляй ссылки, названия СМИ или упоминания источника.
 
@@ -666,9 +758,7 @@ def send_post(chat_id, item, post, keyboard=None):
 
 def publish(item, post):
     """Публикует пост в канал. Источник новости намеренно не указывается."""
-    if not item.get("image"):
-        item["image"] = og_image(item["link"])
-    image = item.get("image")
+    image = resolve_image(item)
     if image and len(render_text(post)) > 1024:
         # Текст не помещается в подпись к фото: фото отдельно, потом текст.
         tg("sendPhoto", chat_id=CHANNEL_ID, photo=image)
@@ -829,7 +919,8 @@ def review_main(state, settings):
             "id": f"d{int(time.time())}_{index}",
             "headline": entry["headline"],
             "body": entry["body"],
-            "image": entry.get("image") or og_image(entry["link"]),
+            "image": resolve_image(entry),
+            "game": entry.get("game", ""),
             "link": entry["link"],
             "source": entry["source"],
             "title": entry["title"],
