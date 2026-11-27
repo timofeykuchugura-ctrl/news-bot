@@ -7,6 +7,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote
 
 import feedparser
 import requests
@@ -41,12 +42,12 @@ QUEUE_MAX_AGE_MIN = 100
 PER_FEED = 40
 MAX_CANDIDATES = 70
 
-# Только новости про игры Roblox. Чтобы добавить новости самой платформы
-# (DevForum, блог Roblox), поставьте True.
-ALLOW_PLATFORM_NEWS = False
+# Новости платформы Roblox для игроков (новые функции, тесты, общие ивенты платформы).
+# Чтобы оставить только новости про отдельные игры, поставьте False.
+ALLOW_PLATFORM_NEWS = True
 # Игра считается популярной, если в топах Roblox у неё не меньше столько игроков онлайн.
 MIN_LIVE_PLAYERS = 5000
-FILTER_VERSION = 5
+FILTER_VERSION = 6
 
 # Заголовки как у обычного браузера: так сайты реже блокируют бота (ошибка 403).
 UA = {
@@ -63,6 +64,9 @@ GAME_FEEDS = {
     "Try Hard Guides": "https://tryhardguides.com/tag/roblox/feed/",
 }
 # Поиск свежих новостей по сотням сайтов через Google News.
+# Bing News даёт описание, настоящие ссылки и картинки: он основной, Google News запасной.
+USE_BING_NEWS = True
+BING_NEWS_URL = "https://www.bing.com/news/search"
 USE_GOOGLE_NEWS = True
 GOOGLE_NEWS_URL = "https://news.google.com/rss/search"
 GOOGLE_NEWS_WHEN = "2d"          # за какой период искать
@@ -71,6 +75,10 @@ GOOGLE_GENERIC_QUERIES = [
     "Roblox game update event",
     "Roblox free item event",
     "Roblox new season update",
+    "Roblox new feature",
+    "Roblox testing new feature chat avatar",
+    "Roblox platform event free items",
+    "Roblox working on new feature",
 ]
 # Если у новости нет картинки, берём иконку игры с Roblox.
 UNIVERSE_IDS = {}
@@ -145,6 +153,29 @@ OFFGAME_RE = re.compile(
     r"\b(merch(?:andise)?|giveaways?|sweepstakes|contests?|gift ?cards?|plush(?:ies)?|"
     r"toys?|collectibles?|walmart|target|amazon|convention|conference|rdc|meetup|"
     r"discounts?|sale)\b",
+    re.I,
+)
+
+# Новости платформы Roblox для игроков: новые функции, тесты, общие ивенты.
+PLATFORM_SIGNAL = re.compile(
+    r"\b(tests?|testing|rolls? out|rolling out|rollout|now available|available now|"
+    r"redesign(?:ed)?|revamp(?:ed)?|new look|new features?|features?|beta|preview|"
+    r"working on|in development|coming soon|spotted|leak(?:s|ed)?|sneak peek|teaser|"
+    r"chat|channels?|emoji|emotes?|avatars?|communit(?:y|ies)|friends?|voice|"
+    r"great build|platform[- ]wide|free (?:items?|ugc|avatars?|rewards?)|events?|"
+    r"updates?|updated|adds?|added|introduc(?:es|ed|ing)?|launch(?:es|ed)?|unveil(?:s|ed)?)\b",
+    re.I,
+)
+# Не нужно: бизнес, суды и всё для разработчиков.
+BUSINESS_RE = re.compile(
+    r"\b(lawsuits?|sued|sues|attorney general|investigation|stock|shares|earnings|revenue|"
+    r"investors?|analysts?|acquisition|layoffs?|settle(?:s|ment)?|fined?|regulators?|"
+    r"senators?|congress)\b",
+    re.I,
+)
+DEV_RE = re.compile(
+    r"\b(api|sdk|studio|luau|scripting|scripts?|deprecat\w*|plugins?|engine|devforum|"
+    r"creator hub|toolbox|datastores?)\b",
     re.I,
 )
 
@@ -404,6 +435,16 @@ def resolve_image(item):
     return image
 
 
+def is_platform_story(title, summary, platform_source=False):
+    """Новости платформы для игроков: новые функции, тесты, общие ивенты."""
+    text = f"{title} {summary}"
+    if not platform_source and "roblox" not in norm(text):
+        return False
+    if BUSINESS_RE.search(title) or DEV_RE.search(title):
+        return False
+    return bool(PLATFORM_SIGNAL.search(text))
+
+
 def is_unwanted(title):
     """Гайды, списки кодов, мерч, конкурсы и мероприятия вне игр."""
     if GUIDE_RE.search(title) or OFFGAME_RE.search(title):
@@ -421,6 +462,35 @@ def has_real_news(title, summary):
     if PROMO_LANGUAGE.search(text) and not NEWS_SIGNAL.search(title):
         return False
     return True
+
+
+def unwrap_link(link):
+    """Bing даёт ссылку-обёртку; настоящий адрес лежит в параметре url."""
+    match = re.search(r"[?&]url=([^&]+)", link or "")
+    return unquote(match.group(1)) if match else link
+
+
+def article_text(url):
+    """Достаёт описание и абзацы статьи, чтобы новость можно было пересказать."""
+    try:
+        response = requests.get(url, headers=UA, timeout=15)
+        response.raise_for_status()
+    except requests.RequestException:
+        return ""
+    page = response.text
+    parts = []
+    description = re.search(
+        r'<meta[^>]+(?:property|name)=["\'](?:og:description|description)["\'][^>]+content=["\']([^"\']+)',
+        page,
+        re.I,
+    )
+    if description:
+        parts.append(html.unescape(description.group(1)))
+    for paragraph in re.findall(r"<p[^>]*>(.*?)</p>", page, re.S | re.I):
+        text = strip_tags(paragraph)
+        if len(text) > 60:
+            parts.append(text)
+    return " ".join(parts)[:2500]
 
 
 def google_queries(popular):
@@ -467,6 +537,12 @@ def collect(state):
     sources += [(n, [(u, None)]) for n, u in GENERAL_FEEDS.items()]
     if ALLOW_PLATFORM_NEWS:
         sources += [(n, [(u, None)]) for n, u in PLATFORM_FEEDS.items()]
+    if USE_BING_NEWS:
+        bing_calls = [
+            (BING_NEWS_URL, {"q": q, "format": "rss", "setlang": "en-US", "mkt": "en-US", "qft": 'sortbydate="1"'})
+            for q in google_queries(popular)
+        ]
+        sources.append(("Bing News", bing_calls))
     if USE_GOOGLE_NEWS:
         calls = [
             (GOOGLE_NEWS_URL, {"q": f"{q} when:{GOOGLE_NEWS_WHEN}", "hl": "en-US", "gl": "US", "ceid": "US:en"})
@@ -484,7 +560,7 @@ def collect(state):
         count = 0
         stat = {"старые": 0, "уже были": 0, "не про игру": 0, "гайд/мерч": 0, "не новость": 0}
         for entry in entries:
-            link = entry.get("link")
+            link = unwrap_link(entry.get("link"))
             title = strip_tags(entry.get("title", ""))
             if is_google:
                 # Google добавляет к заголовку « - название сайта»
@@ -510,17 +586,19 @@ def collect(state):
                     summary += " " + strip_tags(part.get("value", ""))
                 summary = summary[:2500]
 
-            game = None
-            if not platform_news:
-                game = find_popular_game(title, summary, popular)
-                if not game:
+            game = find_popular_game(title, summary, popular)
+            platform_story = False
+            if not game or platform_news:
+                if ALLOW_PLATFORM_NEWS and is_platform_story(title, summary, platform_news):
+                    platform_story = True
+                elif not game:
                     stat["не про игру"] += 1
-                    continue  # не про популярную игру
+                    continue  # не про популярную игру и не новость платформы
             if is_unwanted(title):
                 stat["гайд/мерч"] += 1
                 print(f"[skip] Гайд, коды, мерч или конкурс: {title}")
                 continue
-            if not has_real_news(title, summary):
+            if not platform_story and not has_real_news(title, summary):
                 stat["не новость"] += 1
                 print(f"[skip] Не похоже на новость: {title}")
                 continue
@@ -531,7 +609,7 @@ def collect(state):
                 "title": title,
                 "summary": summary,
                 "link": link,
-                "image": None if is_google else find_image(entry),
+                "image": None if is_google else (find_image(entry) or (entry.get("news_image") if good_image(entry.get("news_image")) else None)),
                 "game": game or "",
             })
             count += 1
@@ -610,7 +688,7 @@ def gemini_json(prompt):
 
 def choose_many(items, state, count):
     listing = "\n".join(
-        f"{index}. [{item.get('game') or item['source']}] {item['title']} — "
+        f"{index}. [{item.get('game') or 'платформа Roblox'}] {item['title']} — "
         f"{item.get('summary', '')[:400]}"
         for index, item in enumerate(items)
     )
@@ -618,8 +696,8 @@ def choose_many(items, state, count):
         f"- {headline}" for headline in state["headlines"][-25:]
     ) or "(пока ничего)"
 
-    prompt = f"""Ты главный редактор русскоязычного Telegram-канала про популярные игры Roblox.
-Ниже заголовки новостей. В квадратных скобках указана игра, о которой новость.
+    prompt = f"""Ты главный редактор русскоязычного Telegram-канала про Roblox для игроков.
+Ниже заголовки новостей. В квадратных скобках указана игра или «платформа Roblox».
 Недавно уже опубликовано:
 {recent}
 
@@ -628,17 +706,19 @@ def choose_many(items, state, count):
 Если несколько сайтов пишут об одном событии, выбери только один материал.
 Не выбирай повторы уже опубликованных новостей.
 
-ПОДХОДЯТ только новости трёх видов:
+ПОДХОДЯТ новости четырёх видов:
 1) обновления популярных игр: патчи, сезоны, новые карты, режимы, боссы, питомцы,
    оружие, механики;
-2) бесплатные внутриигровые вещи и награды: бесплатные предметы, питомцы, UGC;
-3) внутриигровые ивенты, коллаборации и временные активности.
+2) бесплатные вещи и награды: бесплатные предметы, питомцы, UGC;
+3) ивенты, коллаборации и временные активности, в том числе общие ивенты платформы;
+4) новости платформы Roblox для игроков: новые функции и тесты (чат, эмодзи, аватары,
+   сообщества, друзья, интерфейс), утечки и разработка новых функций.
 
-НЕ ПОДХОДЯТ: гайды, туториалы, tier-листы, списки и промокоды; новости самой платформы
-Roblox, Roblox Studio, разработчиков, правил и безопасности; мерч, розыгрыши, конкурсы,
-подарочные карты и мероприятия вне игр; обзоры, рекламные описания игр и пустые анонсы;
-игры не из Roblox.
-Предпочитай самые популярные и обсуждаемые игры.
+НЕ ПОДХОДЯТ: гайды, туториалы, tier-листы, списки и промокоды; бизнес-новости, суды,
+акции и финансы; инструменты для разработчиков (Studio, API, скрипты); мерч, розыгрыши,
+конкурсы, подарочные карты и мероприятия вне игр; обзоры, рекламные описания игр
+и пустые анонсы; игры не из Roblox.
+Предпочитай самые интересные новости про популярные игры и новые функции платформы.
 Расположи выбранные новости по важности.
 
 Заголовки:
@@ -663,7 +743,7 @@ def rewrite_many(items):
     blocks = []
     for index, item in enumerate(items):
         blocks.append(
-            f"[{index}] Игра: {item.get('game') or 'Roblox'}\n"
+            f"[{index}] Игра: {item.get('game') or 'Roblox (платформа)'}\n"
             f"Заголовок: {item['title']}\nТекст: {item['summary']}"
         )
 
@@ -700,7 +780,7 @@ def rewrite_one(item):
 Нейтральный тон, 2-4 коротких предложения, максимум 600 символов.
 Не добавляй ссылки, названия СМИ или упоминания источника.
 
-Игра: {item.get('game') or 'Roblox'}
+Игра: {item.get('game') or 'Roblox (платформа)'}
 Заголовок: {item['title']}
 Текст: {item['summary']}
 
@@ -779,6 +859,12 @@ def make_entries(state):
     if not chosen:
         print("Gemini не выбрал новости из найденных материалов")
         return []
+
+    for item in chosen:
+        if item.get("source") != "Google News" and len(item.get("summary", "")) < 400:
+            extra = article_text(item["link"])
+            if extra:
+                item["summary"] = (item.get("summary", "") + " " + extra)[:2500]
 
     try:
         posts = rewrite_many(chosen)
@@ -920,7 +1006,6 @@ def review_main(state, settings):
             "headline": entry["headline"],
             "body": entry["body"],
             "image": resolve_image(entry),
-            "game": entry.get("game", ""),
             "link": entry["link"],
             "source": entry["source"],
             "title": entry["title"],
